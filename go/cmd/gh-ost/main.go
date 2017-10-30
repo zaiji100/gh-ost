@@ -16,6 +16,7 @@ import (
 	"github.com/github/gh-ost/go/logic"
 	"github.com/outbrain/golib/log"
 
+	"github.com/fatih/color"
 	"golang.org/x/crypto/ssh/terminal"
 )
 
@@ -46,6 +47,8 @@ func acceptSignals(migrationContext *base.MigrationContext) {
 
 // main is the application's entry point. It will either spawn a CLI or HTTP interfaces.
 func main() {
+	fmt.Fprintf(os.Stdout, color.GreenString("# === Begin ===\n"))
+
 	migrationContext := base.GetMigrationContext()
 
 	// hostname, db, username, password等基本上不会经常变化，可以放在某个地方
@@ -336,5 +339,5 @@ func main() {
 		migrator.ExecOnFailureHook()
 		log.Fatale(err)
 	}
-	fmt.Fprintf(os.Stdout, "# Done\n")
+	fmt.Fprintf(os.Stdout, color.GreenString("# === Done ===^-^ ^-^\n"))
 }
