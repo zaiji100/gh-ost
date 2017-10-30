@@ -370,8 +370,8 @@ func (this *Applier) ReadMigrationMinValues(uniqueKey *sql.UniqueKey) error {
 		if err = rows.Scan(this.migrationContext.MigrationRangeMinValues.ValuesPointers...); err != nil {
 			return err
 		}
+		log.Infof(color.GreenString("Migration min values: [%s]"), this.migrationContext.MigrationRangeMinValues.String())
 	}
-	log.Infof(color.GreenString("Migration min values: [%s]"), this.migrationContext.MigrationRangeMinValues.String())
 	return err
 }
 
@@ -391,8 +391,8 @@ func (this *Applier) ReadMigrationMaxValues(uniqueKey *sql.UniqueKey) error {
 		if err = rows.Scan(this.migrationContext.MigrationRangeMaxValues.ValuesPointers...); err != nil {
 			return err
 		}
+		log.Infof(color.GreenString("Migration max values: [%s]"), this.migrationContext.MigrationRangeMaxValues.String())
 	}
-	log.Infof(color.GreenString("Migration max values: [%s]"), this.migrationContext.MigrationRangeMaxValues.String())
 	return err
 }
 
