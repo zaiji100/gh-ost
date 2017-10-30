@@ -156,6 +156,7 @@ type MigrationContext struct {
 	ThrottleHTTPStatusCode                 int64
 	controlReplicasLagResult               mysql.ReplicationLagResult
 	TotalRowsCopied                        int64
+	RowCopyComplete                        atomic.Value
 	TotalDMLEventsApplied                  int64
 	DMLBatchSize                           int64
 	isThrottled                            bool

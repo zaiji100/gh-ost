@@ -406,6 +406,7 @@ func (this *Migrator) Migrate() (err error) {
 	log.Debugf("Operating until row copy is complete")
 	// 等待迁移完毕
 	this.consumeRowCopyComplete()
+	this.migrationContext.RowCopyComplete.Store(true)
 	log.Infof(color.MagentaString("=== Row copy complete, Next: CutOver ==="))
 	if err := this.hooksExecutor.onRowCopyComplete(); err != nil {
 		return err
@@ -976,28 +977,31 @@ func (this *Migrator) printStatus(rule PrintStatusRule, writers ...io.Writer) {
 
 	currentBinlogCoordinates := *this.eventsStreamer.GetCurrentBinlogCoordinates()
 
-	// "Copy: %d/%d %.1f%%; Applied: %d; Backlog: %d/%d; Time: %+v(total), %+v(copy); streamer: %+v; State: %s; ETA: %s"
-	format := GetRowFormat(rowsEstimate)
-	status := fmt.Sprintf(format,
-		totalRowsCopied, rowsEstimate, progressPct,
-		atomic.LoadInt64(&this.migrationContext.TotalDMLEventsApplied),
-		len(this.applyEventsQueue), cap(this.applyEventsQueue),
-		base.PrettifyDurationOutput(elapsedTime), base.PrettifyDurationOutput(this.migrationContext.ElapsedRowCopyTime()),
-		currentBinlogCoordinates,
-		state,
-		eta,
-	)
-	this.applier.WriteChangelog(
-		fmt.Sprintf("copy iteration %d at %d", this.migrationContext.GetIteration(), time.Now().Unix()),
-		status,
-	)
-	if !this.migrationContext.Noop {
-		w := io.MultiWriter(writers...)
-		fmt.Fprintln(w, status)
-	}
+	// 结束之后就不再汇报情况
+	if !this.migrationContext.RowCopyComplete.Load().(bool) {
+		// "Copy: %d/%d %.1f%%; Applied: %d; Backlog: %d/%d; Time: %+v(total), %+v(copy); streamer: %+v; State: %s; ETA: %s"
+		format := GetRowFormat(rowsEstimate)
+		status := fmt.Sprintf(format,
+			totalRowsCopied, rowsEstimate, progressPct,
+			atomic.LoadInt64(&this.migrationContext.TotalDMLEventsApplied),
+			len(this.applyEventsQueue), cap(this.applyEventsQueue),
+			base.PrettifyDurationOutput(elapsedTime), base.PrettifyDurationOutput(this.migrationContext.ElapsedRowCopyTime()),
+			currentBinlogCoordinates,
+			state,
+			eta,
+		)
+		this.applier.WriteChangelog(
+			fmt.Sprintf("copy iteration %d at %d", this.migrationContext.GetIteration(), time.Now().Unix()),
+			status,
+		)
+		if !this.migrationContext.Noop {
+			w := io.MultiWriter(writers...)
+			fmt.Fprintln(w, status)
+		}
 
-	if elapsedSeconds%60 == 0 {
-		this.hooksExecutor.onStatus(status)
+		if elapsedSeconds%60 == 0 {
+			this.hooksExecutor.onStatus(status)
+		}
 	}
 }
 

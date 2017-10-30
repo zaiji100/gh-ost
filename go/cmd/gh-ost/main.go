@@ -206,7 +206,7 @@ func main() {
 	maxLoadValue := *maxLoad
 	criticalLoadValue := *criticalLoad
 	chunkSizeValue := *chunkSize
-
+	migrationContext.RowCopyComplete.Store(false)
 	if len(*dbConfigFile) > 0 && base.FileExists(*dbConfigFile) {
 		// 读取配置文件
 		config, err := base.NewConfigWithFile(*dbConfigFile)
