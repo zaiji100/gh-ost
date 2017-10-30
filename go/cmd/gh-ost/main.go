@@ -48,16 +48,25 @@ func acceptSignals(migrationContext *base.MigrationContext) {
 func main() {
 	migrationContext := base.GetMigrationContext()
 
+	// hostname, db, username, password等基本上不会经常变化，可以放在某个地方
+	// 通过 dbConfigFile, 可以使用db的alias来简化命令行参数
+	dbAlias := flag.String("db-alias", "", "db alias in db conf file")
+	dbConfigFile := flag.String("hosts-conf", "", "hosts config file")
+
 	flag.StringVar(&migrationContext.InspectorConnectionConfig.Key.Hostname, "host", "127.0.0.1", "MySQL hostname (preferably a replica, not the master)")
+
+	// 主动告知master(可以不告知的)
 	flag.StringVar(&migrationContext.AssumeMasterHostname, "assume-master-host", "", "(optional) explicitly tell gh-ost the identity of the master. Format: some.host.com[:port] This is useful in master-master setups where you wish to pick an explicit master, or in a tungsten-replicator where gh-ost is unabel to determine the master")
 	flag.IntVar(&migrationContext.InspectorConnectionConfig.Key.Port, "port", 3306, "MySQL port (preferably a replica, not the master)")
+
 	flag.StringVar(&migrationContext.CliUser, "user", "", "MySQL user")
 	flag.StringVar(&migrationContext.CliPassword, "password", "", "MySQL password")
 	flag.StringVar(&migrationContext.CliMasterUser, "master-user", "", "MySQL user on master, if different from that on replica. Requires --assume-master-host")
 	flag.StringVar(&migrationContext.CliMasterPassword, "master-password", "", "MySQL password on master, if different from that on replica. Requires --assume-master-host")
 
-	// 配置文件的作用?
+	// XXX: 配置文件的作用?
 	flag.StringVar(&migrationContext.ConfigFile, "conf", "", "Config file")
+
 	// 可以不指定密码，每次由运维来主动输入
 	askPass := flag.Bool("ask-pass", false, "prompt for MySQL password")
 
@@ -112,8 +121,6 @@ func main() {
 
 	maxLagMillis := flag.Int64("max-lag-millis", 1500, "replication lag at which to throttle operation")
 
-	// 不要再用了，内部实现更好: subsecond resolution
-	replicationLagQuery := flag.String("replication-lag-query", "", "Deprecated. gh-ost uses an internal, subsecond resolution query")
 	throttleControlReplicas := flag.String("throttle-control-replicas", "", "List of replicas on which to check for lag; comma delimited. Example: myhost1.com:3306,myhost2.com,myhost3.com:3307")
 	throttleQuery := flag.String("throttle-query", "", "when given, issued (every second) to check if operation should throttle. Expecting to return zero for no-throttle, >0 for throttle. Query is issued on the migrated server. Make sure this query is lightweight")
 	throttleHTTP := flag.String("throttle-http", "", "when given, gh-ost checks given URL via HEAD request; any response code other than 200 (OK) causes throttling; make sure it has low latency response")
@@ -196,9 +203,48 @@ func main() {
 		log.SetLevel(log.ERROR)
 	}
 
+	maxLoadValue := *maxLoad
+	criticalLoadValue := *criticalLoad
+	chunkSizeValue := *chunkSize
+
+	if len(*dbConfigFile) > 0 && base.FileExists(*dbConfigFile) {
+		// 读取配置文件
+		config, err := base.NewConfigWithFile(*dbConfigFile)
+		if err != nil {
+			log.Fatalf("db config file invalid: %s", *dbConfigFile)
+		}
+		// 实现alias到db的映射
+		db, host, port := config.GetDB(*dbAlias)
+		migrationContext.InspectorConnectionConfig.Key.Hostname = host
+		migrationContext.InspectorConnectionConfig.Key.Port = port
+		migrationContext.DatabaseName = db
+
+		if master, ok := config.Slave2Master[migrationContext.InspectorConnectionConfig.Key.Hostname]; ok {
+			migrationContext.AssumeMasterHostname = master
+		}
+
+		migrationContext.InitiallyDropGhostTable = config.InitiallyDropGhosTable
+		migrationContext.InitiallyDropOldTable = config.InitiallyDropOldTable
+		migrationContext.DropServeSocket = config.InitiallyDropSocketFile
+		migrationContext.CliUser = config.User
+		migrationContext.CliPassword = config.Password
+
+		maxLoadValue = config.MaxLoad
+		criticalLoadValue = config.CriticalLoad
+		chunkSizeValue = config.ChunkSize
+
+		if config.IsRdsMySQL {
+			migrationContext.InspectorConnectionConfig.IsRds = true
+			migrationContext.ApplierConnectionConfig.IsRds = true
+			migrationContext.AssumeRBR = true // RDS必须这样
+		}
+
+	}
+
 	if migrationContext.DatabaseName == "" {
 		log.Fatalf("--database must be provided and database name must not be empty")
 	}
+
 	if migrationContext.OriginalTableName == "" {
 		log.Fatalf("--table must be provided and table name must not be empty")
 	}
@@ -230,9 +276,6 @@ func main() {
 	if migrationContext.CliMasterPassword != "" && migrationContext.AssumeMasterHostname == "" {
 		log.Fatalf("--master-password requires --assume-master-host")
 	}
-	if *replicationLagQuery != "" {
-		log.Warningf("--replication-lag-query is deprecated")
-	}
 
 	switch *cutOver {
 	case "atomic", "default", "":
@@ -248,10 +291,10 @@ func main() {
 	if err := migrationContext.ReadThrottleControlReplicaKeys(*throttleControlReplicas); err != nil {
 		log.Fatale(err)
 	}
-	if err := migrationContext.ReadMaxLoad(*maxLoad); err != nil {
+	if err := migrationContext.ReadMaxLoad(maxLoadValue); err != nil {
 		log.Fatale(err)
 	}
-	if err := migrationContext.ReadCriticalLoad(*criticalLoad); err != nil {
+	if err := migrationContext.ReadCriticalLoad(criticalLoadValue); err != nil {
 		log.Fatale(err)
 	}
 	if migrationContext.ServeSocketFile == "" {
@@ -269,7 +312,7 @@ func main() {
 	}
 	migrationContext.SetHeartbeatIntervalMilliseconds(*heartbeatIntervalMillis)
 	migrationContext.SetNiceRatio(*niceRatio)
-	migrationContext.SetChunkSize(*chunkSize)
+	migrationContext.SetChunkSize(chunkSizeValue)
 	migrationContext.SetDMLBatchSize(*dmlBatchSize)
 	migrationContext.SetMaxLagMillisecondsThrottleThreshold(*maxLagMillis)
 
