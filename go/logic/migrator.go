@@ -1287,7 +1287,7 @@ func (this *Migrator) finalCleanup() error {
 	if this.migrationContext.Noop {
 		if createTableStatement, err := this.inspector.showCreateTable(this.migrationContext.GetGhostTableName()); err == nil {
 			log.Infof("New table structure follows")
-			fmt.Println(createTableStatement)
+			log.Infof(createTableStatement)
 		} else {
 			log.Errore(err)
 		}
