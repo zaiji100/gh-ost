@@ -19,8 +19,8 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/juju/errors"
+	"github.com/outbrain/golib/log"
 	"github.com/outbrain/golib/sqlutils"
-	log "github.com/wfxiang08/cyutils/utils/rolling_log"
 )
 
 const startSlavePostWaitMilliseconds = 500 * time.Millisecond
@@ -44,32 +44,26 @@ func (this *Inspector) InitDBConnections() (err error) {
 	inspectorUri := this.connectionConfig.GetDBUri(this.migrationContext.DatabaseName)
 	log.Infof("DB: %s --> Uri: %s", this.migrationContext.DatabaseName, inspectorUri)
 	if this.db, _, err = sqlutils.GetDB(inspectorUri); err != nil {
-		log.ErrorErrorf(err, "get db failed")
-		return err
+		return log.Errore(err)
 	}
 	if err := this.validateConnection(); err != nil {
-		log.ErrorErrorf(err, "validateConnection failed")
-		return err
+		return log.Errore(err)
 	}
 	if impliedKey, err := mysql.GetInstanceKey(this.db); err != nil {
-		log.ErrorErrorf(err, "GetInstanceKey failed")
-		return err
+		return log.Errore(err)
 	} else {
 		this.connectionConfig.ImpliedKey = impliedKey
 	}
 
 	// 验证当前的授权是否OK
 	if err := this.validateGrants(); err != nil {
-		log.ErrorErrorf(err, "validateGrants failed")
-		return err
+		return log.Errore(err)
 	}
 	if err := this.validateBinlogs(); err != nil {
-		log.ErrorErrorf(err, "validateBinlogs failed")
-		return err
+		return log.Errore(err)
 	}
 	if err := this.applyBinlogFormat(); err != nil {
-		log.ErrorErrorf(err, "applyBinlogFormat failed")
-		return err
+		return log.Errore(err)
 	}
 	log.Infof("Inspector initiated on %+v, version %+v", this.connectionConfig.ImpliedKey, this.migrationContext.InspectorMySQLVersion)
 	return nil
@@ -156,7 +150,7 @@ func (this *Inspector) inspectOriginalAndGhostTables() (err error) {
 	// 是否允许Nullable？
 	if this.migrationContext.UniqueKey.HasNullable {
 		if this.migrationContext.NullableUniqueKeyAllowed {
-			log.Printf("Chosen key (%s) has nullable columns. You have supplied with --allow-nullable-unique-key and so this migration proceeds. As long as there aren't NULL values in this key's column, migration should be fine. NULL values will corrupt migration's data", this.migrationContext.UniqueKey)
+			log.Warningf("Chosen key (%s) has nullable columns. You have supplied with --allow-nullable-unique-key and so this migration proceeds. As long as there aren't NULL values in this key's column, migration should be fine. NULL values will corrupt migration's data", this.migrationContext.UniqueKey)
 		} else {
 			return fmt.Errorf("Chosen key (%s) has nullable columns. Bailing out. To force this operation to continue, supply --allow-nullable-unique-key flag. Only do so if you are certain there are no actual NULL values in this key. As long as there aren't, migration should be fine. NULL values in columns of this key will corrupt migration's data", this.migrationContext.UniqueKey)
 		}
@@ -308,7 +302,7 @@ func (this *Inspector) restartReplication() error {
 	var stopError, startError error
 
 	if this.connectionConfig.IsRds {
-		log.Panicf("Rds should not reach here: AssumeRBR should make sure by calling user")
+		log.Fatal("Rds should not reach here: AssumeRBR should make sure by calling user")
 		// _, stopError = sqlutils.ExecNoPrepare(this.db, `CALL mysql.rds_stop_replication`)
 		// _, startError = sqlutils.ExecNoPrepare(this.db, `CALL mysql.rds_start_replication`)
 	} else {
@@ -425,7 +419,7 @@ func (this *Inspector) validateLogSlaveUpdates() error {
 	}
 
 	if this.migrationContext.IsTungsten {
-		log.Printf("log_slave_updates not found on %s:%d, but --tungsten provided, so I'm proceeding", this.connectionConfig.Key.Hostname, this.connectionConfig.Key.Port)
+		log.Warningf("log_slave_updates not found on %s:%d, but --tungsten provided, so I'm proceeding", this.connectionConfig.Key.Hostname, this.connectionConfig.Key.Port)
 		return nil
 	}
 
@@ -434,7 +428,7 @@ func (this *Inspector) validateLogSlaveUpdates() error {
 	}
 
 	if this.migrationContext.InspectorIsAlsoApplier() {
-		log.Printf("log_slave_updates not found on %s:%d, but executing directly on master, so I'm proceeeding", this.connectionConfig.Key.Hostname, this.connectionConfig.Key.Port)
+		log.Warningf("log_slave_updates not found on %s:%d, but executing directly on master, so I'm proceeeding", this.connectionConfig.Key.Hostname, this.connectionConfig.Key.Port)
 		return nil
 	}
 
@@ -474,7 +468,7 @@ func (this *Inspector) validateTable() error {
 // validateTableForeignKeys makes sure no foreign keys exist on the migrated table
 func (this *Inspector) validateTableForeignKeys(allowChildForeignKeys bool) error {
 	if this.migrationContext.SkipForeignKeyChecks {
-		log.Printf("--skip-foreign-key-checks provided: will not check for foreign keys")
+		log.Warningf("--skip-foreign-key-checks provided: will not check for foreign keys")
 		return nil
 	}
 	query := `

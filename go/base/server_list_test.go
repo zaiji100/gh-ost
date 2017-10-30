@@ -4,13 +4,13 @@ import (
 	"testing"
 
 	"fmt"
-	log "github.com/wfxiang08/cyutils/utils/rolling_log"
+	"github.com/outbrain/golib/log"
 	test "github.com/outbrain/golib/tests"
 	"strings"
 )
 
 func init() {
-	log.SetLevel(log.LEVEL_ERROR)
+	log.SetLevel(log.ERROR)
 }
 
 // go test github.com/github/gh-ost/go/base -v -run "TestServerListParse"
