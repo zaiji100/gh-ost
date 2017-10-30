@@ -991,8 +991,10 @@ func (this *Migrator) printStatus(rule PrintStatusRule, writers ...io.Writer) {
 		fmt.Sprintf("copy iteration %d at %d", this.migrationContext.GetIteration(), time.Now().Unix()),
 		status,
 	)
-	w := io.MultiWriter(writers...)
-	fmt.Fprintln(w, status)
+	if !this.migrationContext.Noop {
+		w := io.MultiWriter(writers...)
+		fmt.Fprintln(w, status)
+	}
 
 	if elapsedSeconds%60 == 0 {
 		this.hooksExecutor.onStatus(status)

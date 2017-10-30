@@ -5,8 +5,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/fatih/color"
 	"github.com/juju/errors"
+	"github.com/outbrain/golib/log"
 	"io/ioutil"
-	"log"
 	"strconv"
 	"strings"
 )
@@ -75,14 +75,14 @@ func (c *DatabaseConfig) GetDB(alias string) (dbName string, hostname string, po
 		} else if fields[0] == alias {
 			items := strings.Split(fields[1], "@")
 			if len(items) < 2 {
-				log.Panic(color.RedString("Invalid db config found: %s\n"), db)
+				log.Fatalf(color.RedString("Invalid db config found: %s\n"), db)
 			} else {
 				dbName = items[0]
 				hostname = items[1]
 				if len(items) > 2 {
 					p, err := strconv.ParseInt(items[2], 10, 64)
 					if err != nil {
-						log.Panic(color.RedString("Invalid db config found: %s\n"), db)
+						log.Fatalf(color.RedString("Invalid db config found: %s\n"), db)
 					}
 					port = int(p)
 				} else {
@@ -95,6 +95,6 @@ func (c *DatabaseConfig) GetDB(alias string) (dbName string, hostname string, po
 		}
 	}
 
-	log.Panic(color.RedString("No db found for alias: %s\n"), alias)
+	log.Fatalf(color.RedString("No db found for alias: %s\n"), alias)
 	return
 }
