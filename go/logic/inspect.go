@@ -42,7 +42,7 @@ func NewInspector() *Inspector {
 
 func (this *Inspector) InitDBConnections() (err error) {
 	inspectorUri := this.connectionConfig.GetDBUri(this.migrationContext.DatabaseName)
-	log.Infof("DB: %s --> Uri: %s", this.migrationContext.DatabaseName, inspectorUri)
+	// log.Infof("DB: %s --> Uri: %s", this.migrationContext.DatabaseName, inspectorUri)
 	if this.db, _, err = sqlutils.GetDB(inspectorUri); err != nil {
 		return log.Errore(err)
 	}
