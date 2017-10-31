@@ -18,6 +18,11 @@ import (
 
 	"github.com/fatih/color"
 	"golang.org/x/crypto/ssh/terminal"
+	"path"
+)
+
+const (
+	DEFAULT_HOSTS_CONF = ".gh-ost/dbs.toml"
 )
 
 var AppVersion string
@@ -210,36 +215,50 @@ func main() {
 	criticalLoadValue := *criticalLoad
 	chunkSizeValue := *chunkSize
 	migrationContext.RowCopyComplete.Store(false)
-	if len(*dbConfigFile) > 0 && base.FileExists(*dbConfigFile) {
-		// 读取配置文件
-		config, err := base.NewConfigWithFile(*dbConfigFile)
-		if err != nil {
-			log.Fatalf("db config file invalid: %s", *dbConfigFile)
-		}
-		// 实现alias到db的映射
-		db, host, port := config.GetDB(*dbAlias)
-		migrationContext.InspectorConnectionConfig.Key.Hostname = host
-		migrationContext.InspectorConnectionConfig.Key.Port = port
-		migrationContext.DatabaseName = db
 
-		if master, ok := config.Slave2Master[migrationContext.InspectorConnectionConfig.Key.Hostname]; ok {
-			migrationContext.AssumeMasterHostname = master
+	dbConfigFileValue := *dbConfigFile
+	if len(*dbAlias) > 0 {
+		// 默认地址: ~/.gh-ost/dbs.toml
+		if len(dbConfigFileValue) == 0 {
+			dir, err := base.Dir()
+			if err == nil {
+				dbConfigFileValue = path.Join(dir, DEFAULT_HOSTS_CONF)
+			}
 		}
 
-		migrationContext.InitiallyDropGhostTable = config.InitiallyDropGhosTable
-		migrationContext.InitiallyDropOldTable = config.InitiallyDropOldTable
-		migrationContext.DropServeSocket = config.InitiallyDropSocketFile
-		migrationContext.CliUser = config.User
-		migrationContext.CliPassword = config.Password
+		if len(dbConfigFileValue) > 0 && base.FileExists(dbConfigFileValue) {
+			log.Infof("dbConfigFileValue is %s", dbConfigFileValue)
+			// 读取配置文件
+			config, err := base.NewConfigWithFile(dbConfigFileValue)
+			if err != nil {
+				log.Errore(err)
+				log.Fatalf("db config file invalid: %s", dbConfigFileValue)
+			}
+			// 实现alias到db的映射
+			db, host, port := config.GetDB(*dbAlias)
+			migrationContext.InspectorConnectionConfig.Key.Hostname = host
+			migrationContext.InspectorConnectionConfig.Key.Port = port
+			migrationContext.DatabaseName = db
 
-		maxLoadValue = config.MaxLoad
-		criticalLoadValue = config.CriticalLoad
-		chunkSizeValue = config.ChunkSize
+			if master, ok := config.Slave2Master[migrationContext.InspectorConnectionConfig.Key.Hostname]; ok {
+				migrationContext.AssumeMasterHostname = master
+			}
 
-		if config.IsRdsMySQL {
-			migrationContext.InspectorConnectionConfig.IsRds = true
-			migrationContext.ApplierConnectionConfig.IsRds = true
-			migrationContext.AssumeRBR = true // RDS必须这样
+			migrationContext.InitiallyDropGhostTable = config.InitiallyDropGhosTable
+			migrationContext.InitiallyDropOldTable = config.InitiallyDropOldTable
+			migrationContext.DropServeSocket = config.InitiallyDropSocketFile
+			migrationContext.CliUser = config.User
+			migrationContext.CliPassword = config.Password
+
+			maxLoadValue = config.MaxLoad
+			criticalLoadValue = config.CriticalLoad
+			chunkSizeValue = config.ChunkSize
+
+			if config.IsRdsMySQL {
+				migrationContext.InspectorConnectionConfig.IsRds = true
+				migrationContext.ApplierConnectionConfig.IsRds = true
+				migrationContext.AssumeRBR = true // RDS必须这样
+			}
 		}
 
 	}
