@@ -8,7 +8,6 @@ user = ""
 password = ""
 is_rds_mysql = false
 assume_rbr = true
-throttle_control_replicas=""
 max_lag_millis=1500
 
 slave_master_mapping = [

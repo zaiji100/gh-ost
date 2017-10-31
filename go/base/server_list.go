@@ -37,8 +37,7 @@ type DatabaseConfig struct {
 	Slave2Master       map[string]string
 
 	// Throttle控制
-	MaxLagMillis            int64  `toml:"max_lag_millis"`
-	ThrottleControlReplicas string `toml:"throttle_control_replicas"`
+	MaxLagMillis int64 `toml:"max_lag_millis"`
 }
 
 func NewConfigWithFile(name string) (*DatabaseConfig, error) {

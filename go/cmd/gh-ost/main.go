@@ -267,9 +267,14 @@ func main() {
 			}
 
 			// 如果使用配置文件，则以配置文件为准
-			throttleControlReplicasValue = config.ThrottleControlReplicas
 			if config.MaxLagMillis > 0 {
 				maxLagMillisValue = config.MaxLagMillis
+				// throttleControlReplicasValue
+
+				if _, ok := config.Slave2Master[migrationContext.InspectorConnectionConfig.Key.Hostname]; ok {
+					// 如果当前的host不是master
+					throttleControlReplicasValue = fmt.Sprintf("%s:%d", migrationContext.InspectorConnectionConfig.Key.Hostname, migrationContext.InspectorConnectionConfig.Key.Port)
+				}
 			}
 
 		}
