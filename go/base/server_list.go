@@ -35,6 +35,10 @@ type DatabaseConfig struct {
 	//Master_Port: 3306
 	SlaveMasterMapping [][]string `toml:"slave_master_mapping"`
 	Slave2Master       map[string]string
+
+	// Throttle控制
+	MaxLagMillis            int64  `toml:"max_lag_millis"`
+	ThrottleControlReplicas string `toml:"throttle_control_replicas"`
 }
 
 func NewConfigWithFile(name string) (*DatabaseConfig, error) {
