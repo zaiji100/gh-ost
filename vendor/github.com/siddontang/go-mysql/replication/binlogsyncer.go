@@ -35,8 +35,8 @@ type BinlogSyncerConfig struct {
 	Port uint16
 	// User is for MySQL user.
 	User string
-	// Password is for MySQL password.
-	Password string
+	// Password is for MySQL password. 序列化时不打印出来
+	Password string `json:"-"`
 
 	// Localhost is local hostname if register salve.
 	// If not set, use os.Hostname() instead.
