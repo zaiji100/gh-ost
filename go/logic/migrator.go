@@ -32,13 +32,16 @@ const (
 	AllEventsUpToLockProcessed                = "AllEventsUpToLockProcessed"
 )
 
-func GetRowFormat(total int64) string {
-
-	digitNum := int(math.Log(float64(total))/math.Log(10) + 1)
-	currentFormat := color.GreenString(fmt.Sprintf("%%%dd", digitNum))
-	progress := color.GreenString(" %5.1f%%")
-	return "Copy: " + currentFormat + "/" + color.RedString("%d") + progress + "; Applied: %d; Backlog: %d/%d; Time: " +
-		color.CyanString("%+v") + "(total), %+v(copy); streamer: " + color.BlueString("%+v") + "; State: %s; ETA: " + color.CyanString("%s")
+func GetRowFormat(total int64, origin bool) string {
+	if origin {
+		return "Copy: %d/%d %5.1f%%; Applied: %d; Backlog: %d/%d; Time: %+v(total), %+v(copy); streamer: %+v; State: %s; ETA: %s"
+	} else {
+		digitNum := int(math.Log(float64(total))/math.Log(10) + 1)
+		currentFormat := color.GreenString(fmt.Sprintf("%%%dd", digitNum))
+		progress := color.GreenString(" %5.1f%%")
+		return "Copy: " + currentFormat + "/" + color.RedString("%d") + progress + "; Applied: %d; Backlog: %d/%d; Time: " +
+			color.CyanString("%+v") + "(total), %+v(copy); streamer: " + color.BlueString("%+v") + "; State: %s; ETA: " + color.CyanString("%s")
+	}
 }
 
 func ReadChangelogState(s string) ChangelogState {
@@ -980,7 +983,8 @@ func (this *Migrator) printStatus(rule PrintStatusRule, writers ...io.Writer) {
 	// 结束之后就不再汇报情况
 	if !this.migrationContext.RowCopyComplete.Load().(bool) {
 		// "Copy: %d/%d %.1f%%; Applied: %d; Backlog: %d/%d; Time: %+v(total), %+v(copy); streamer: %+v; State: %s; ETA: %s"
-		format := GetRowFormat(rowsEstimate)
+		// 保存到数据库
+		format := GetRowFormat(rowsEstimate, true)
 		status := fmt.Sprintf(format,
 			totalRowsCopied, rowsEstimate, progressPct,
 			atomic.LoadInt64(&this.migrationContext.TotalDMLEventsApplied),
@@ -993,6 +997,18 @@ func (this *Migrator) printStatus(rule PrintStatusRule, writers ...io.Writer) {
 		this.applier.WriteChangelog(
 			fmt.Sprintf("copy iteration %d at %d", this.migrationContext.GetIteration(), time.Now().Unix()),
 			status,
+		)
+
+		// 打印Log
+		format = GetRowFormat(rowsEstimate, false)
+		status = fmt.Sprintf(format,
+			totalRowsCopied, rowsEstimate, progressPct,
+			atomic.LoadInt64(&this.migrationContext.TotalDMLEventsApplied),
+			len(this.applyEventsQueue), cap(this.applyEventsQueue),
+			base.PrettifyDurationOutput(elapsedTime), base.PrettifyDurationOutput(this.migrationContext.ElapsedRowCopyTime()),
+			currentBinlogCoordinates,
+			state,
+			eta,
 		)
 		if !this.migrationContext.Noop {
 			w := io.MultiWriter(writers...)
