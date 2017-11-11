@@ -80,6 +80,9 @@ func main() {
 
 	flag.StringVar(&migrationContext.DatabaseName, "database", "", "database name (mandatory)")
 	flag.StringVar(&migrationContext.OriginalTableName, "table", "", "table name (mandatory)")
+	flag.StringVar(&migrationContext.OriginalFilter, "origin-filter", "", "filter on origin talbe")
+
+
 	flag.StringVar(&migrationContext.AlterStatement, "alter", "", "alter statement (mandatory)")
 
 	// 不使用精确的Rows估计算法(execution timeout可能使得精确估计不大可能)

@@ -183,7 +183,11 @@ func BuildRangePreparedComparison(columns *ColumnList, args []interface{}, compa
 	return BuildRangeComparison(columns.Names(), values, args, comparisonSign)
 }
 
-func BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName string, sharedColumns []string,
+// originFilterCondition 在做schema migration是顺便将数据做个过滤，例如：可以扔掉一周一样的数据
+// 直接删除大量数据实在不方便，效率低，而且需要整理再进行optimize; 可以通过gh-ost一步到位
+//
+func BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName string, originFilterCondition string,
+	sharedColumns []string,
 	mappedSharedColumns []string, uniqueKey string, uniqueKeyColumns *ColumnList,
 	rangeStartValues, rangeEndValues []string, rangeStartArgs, rangeEndArgs []interface{},
 	includeRangeStartValues bool, transactionalTable bool) (result string, explodedArgs []interface{}, err error) {
@@ -232,18 +236,24 @@ func BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName strin
 	// insert ignore into 如果之前插入了重复元素，则直接忽略
 	// DML Event随时都在监控中，新的修改总会同步到ghost table中
 	//
+	if len(originFilterCondition) > 0 {
+		originFilterCondition = " and (" + originFilterCondition + ")"
+	}
+	//
+	// 例如: select id, a, b, c, d from db.origin_table force index (primary_key) where (id > 1 and id < 1000 and created_time > 12121212)
+	//
 	result = fmt.Sprintf(`
       insert /* gh-ost %s.%s */ ignore into %s.%s (%s)
       (select %s from %s.%s force index (%s)
-        where (%s and %s) %s
+        where (%s and %s %s) %s
       )
     `, databaseName, originalTableName, databaseName, ghostTableName, mappedSharedColumnsListing,
 		sharedColumnsListing, databaseName, originalTableName, uniqueKey,
-		rangeStartComparison, rangeEndComparison, transactionalClause)
+		rangeStartComparison, rangeEndComparison, originFilterCondition, transactionalClause)
 	return result, explodedArgs, nil
 }
 
-func BuildRangeInsertPreparedQuery(databaseName, originalTableName, ghostTableName string,
+func BuildRangeInsertPreparedQuery(databaseName, originalTableName, ghostTableName string, originFilterCondition string,
 	sharedColumns []string, mappedSharedColumns []string, uniqueKey string, uniqueKeyColumns *ColumnList,
 	rangeStartArgs, rangeEndArgs []interface{}, includeRangeStartValues bool,
 	transactionalTable bool) (result string, explodedArgs []interface{}, err error) {
@@ -251,7 +261,9 @@ func BuildRangeInsertPreparedQuery(databaseName, originalTableName, ghostTableNa
 	rangeStartValues := buildColumnsPreparedValues(uniqueKeyColumns)
 	rangeEndValues := buildColumnsPreparedValues(uniqueKeyColumns)
 
-	return BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName, sharedColumns, mappedSharedColumns,
+	return BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName,
+		originFilterCondition,
+		sharedColumns, mappedSharedColumns,
 		uniqueKey, uniqueKeyColumns,
 		rangeStartValues, rangeEndValues, rangeStartArgs, rangeEndArgs,
 		includeRangeStartValues, transactionalTable)

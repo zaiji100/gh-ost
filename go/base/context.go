@@ -71,6 +71,8 @@ func NewThrottleCheckResult(throttle bool, reason string, reasonHint ThrottleRea
 type MigrationContext struct {
 	DatabaseName      string
 	OriginalTableName string
+	OriginalFilter string
+
 	AlterStatement    string
 
 	CountTableRows           bool
