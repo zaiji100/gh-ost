@@ -597,7 +597,7 @@ func (this *Inspector) CountTableRows() error {
 	log.Infof("As instructed, I'm issuing a SELECT COUNT(*) on the table. This may take a while")
 
 	// 这个如何避免在某些DB上execution timeout
-	// TODO: 可以听过索引覆盖模式，将 select count(*)分解成为很多小的查询
+	// TODO: 可以通过索引覆盖模式，将 select count(*)分解成为很多小的查询
 	query := fmt.Sprintf(`select /* gh-ost */ count(*) as rows from %s.%s`, sql.EscapeName(this.migrationContext.DatabaseName), sql.EscapeName(this.migrationContext.OriginalTableName))
 	var rowsEstimate int64
 	if err := this.db.QueryRow(query).Scan(&rowsEstimate); err != nil {
