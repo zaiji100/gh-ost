@@ -604,23 +604,6 @@ func (this *Applier) ApplyIterationInsertQuery() (chunkSize int64, rowsAffected 
 	return chunkSize, rowsAffected, duration, nil
 }
 
-//// LockOriginalTable places a write lock on the original table
-//func (this *Applier) LockOriginalTable() error {
-//	query := fmt.Sprintf(`lock /* gh-ost */ tables %s.%s write`,
-//		sql.EscapeName(this.migrationContext.DatabaseName),
-//		sql.EscapeName(this.migrationContext.OriginalTableName),
-//	)
-//
-//	log.Infof("Locking %s", query)
-//	this.migrationContext.LockTablesStartTime = time.Now()
-//	if _, err := sqlutils.ExecNoPrepare(this.singletonDB, query); err != nil {
-//		return err
-//	}
-//
-//	log.Infof("Table locked")
-//	return nil
-//}
-
 // LockGhoTable places a write lock on the original table
 func (this *Applier) LockGhoOriginTable() error {
 	query := fmt.Sprintf(`lock /* gh-ost */ tables %s.%s write, %s.%s write`,
@@ -632,33 +615,17 @@ func (this *Applier) LockGhoOriginTable() error {
 	log.Infof(color.GreenString("Locking %s"), query)
 
 	this.migrationContext.LockTablesStartTime = time.Now()
-	if _, err := sqlutils.ExecNoPrepare(this.singletonDB, query); err != nil {
-		return err
-	}
 
-	// WriteLock获取到了
+	// 先设置Lock，然后再获取锁；否则还会有部分请求被block住
 	this.WriteLock.Lock()
 	this.WriteLocked = true
 	this.WriteLock.Unlock()
 
-	log.Infof(color.GreenString("ghost&origin Table locked"))
-	return nil
-}
-
-// LockGhoTable places a write lock on the original table
-func (this *Applier) LockGhoTable() error {
-	query := fmt.Sprintf(`lock /* gh-ost */ tables %s.%s write`,
-		sql.EscapeName(this.migrationContext.DatabaseName),
-		sql.EscapeName(this.migrationContext.GetGhostTableName()),
-	)
-	log.Infof(color.GreenString("Locking %s"), query)
-
-	this.migrationContext.LockTablesStartTime = time.Now()
 	if _, err := sqlutils.ExecNoPrepare(this.singletonDB, query); err != nil {
 		return err
 	}
 
-	log.Infof(color.GreenString("ghost Table locked"))
+	log.Infof(color.GreenString("ghost&origin Table locked"))
 	return nil
 }
 
