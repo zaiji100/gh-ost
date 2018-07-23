@@ -604,8 +604,11 @@ func (this *Applier) ApplyIterationInsertQuery() (chunkSize int64, rowsAffected 
 	return chunkSize, rowsAffected, duration, nil
 }
 
-// LockGhoTable places a write lock on the original table
-func (this *Applier) LockGhoOriginTable() error {
+// LockGhostOriginTable 同时锁定origin table和 ghost table
+func (this *Applier) LockGhostOriginTable() error {
+	// 参考：https://blog.csdn.net/zyz511919766/article/details/16342003
+	// lock tables aa write
+	// lock tables bb write 则会释放aa的write lock，获取bb的write lock；而不是在aa write的基础上再增加bb lock
 	query := fmt.Sprintf(`lock /* gh-ost */ tables %s.%s write, %s.%s write`,
 		sql.EscapeName(this.migrationContext.DatabaseName),
 		sql.EscapeName(this.migrationContext.OriginalTableName),
@@ -616,7 +619,8 @@ func (this *Applier) LockGhoOriginTable() error {
 
 	this.migrationContext.LockTablesStartTime = time.Now()
 
-	// 先设置Lock，然后再获取锁；否则还会有部分请求被block住
+	// Lock状态下，需要同步的binlog并不多，且只有 singletonDB 才有ghost table的写权限，
+	// 因此 WriteLocked = true 模式下，都通过 singletonDB 来同步 origin到ghost table的binlog同步
 	this.WriteLock.Lock()
 	this.WriteLocked = true
 	this.WriteLock.Unlock()
@@ -1177,6 +1181,7 @@ func (this *Applier) ApplyDMLEventQuery(dmlEvent *binlog.BinlogDMLEvent) error {
 			var tx *gosql.Tx
 			var err error
 			if this.WriteLocked {
+				// 写锁定的情况下，只有singletonDB有写权限
 				tx, err = this.singletonDB.Begin()
 			} else {
 				tx, err = this.db.Begin()
@@ -1226,6 +1231,7 @@ func (this *Applier) ApplyDMLEventQueries(dmlEvents [](*binlog.BinlogDMLEvent)) 
 		var tx *gosql.Tx
 		var err error
 		if this.WriteLocked {
+			// 写锁定的情况下，只有singletonDB有写权限
 			tx, err = this.singletonDB.Begin()
 		} else {
 			tx, err = this.db.Begin()
