@@ -980,6 +980,15 @@ func (this *Migrator) printStatus(rule PrintStatusRule, writers ...io.Writer) {
 		// and there is no further need to keep updating the value.
 		rowsEstimate = totalRowsCopied
 	}
+
+	// 估计值做一个纠正
+	if this.migrationContext.Partition != nil {
+		rowsEstimate = rowsEstimate / this.migrationContext.Partition.PartitionNum
+	}
+	if rowsEstimate == 0 {
+		rowsEstimate = 1
+	}
+
 	var progressPct float64
 	if rowsEstimate == 0 {
 		progressPct = 100.0
@@ -1052,7 +1061,7 @@ func (this *Migrator) printStatus(rule PrintStatusRule, writers ...io.Writer) {
 	// 结束之后就不再汇报情况
 	if !this.migrationContext.RowCopyComplete.Load().(bool) {
 		// "Copy: %d/%d %.1f%%; Applied: %d; Backlog: %d/%d; Time: %+v(total), %+v(copy); streamer: %+v; State: %s; ETA: %s"
-		// 保存到数据库
+
 		format := GetRowFormat(rowsEstimate, true)
 		status := fmt.Sprintf(format,
 			totalRowsCopied, rowsEstimate, progressPct,
