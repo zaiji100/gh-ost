@@ -21,7 +21,6 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/outbrain/golib/log"
-	"sync"
 )
 
 type ChangelogState string
@@ -90,7 +89,6 @@ type Migrator struct {
 	rowCopyComplete            chan error
 	allEventsUpToLockProcessed chan string
 
-	tableRWLock         sync.Mutex
 	rowCopyCompleteFlag int64
 
 	// copyRowsQueue should not be buffered; if buffered some non-damaging but
@@ -657,13 +655,9 @@ func (this *Migrator) cutOverTwoStep() (err error) {
 	defer atomic.StoreInt64(&this.migrationContext.InCutOverCriticalSectionFlag, 0)
 	atomic.StoreInt64(&this.migrationContext.AllEventsUpToLockProcessedInjectedFlag, 0)
 
-	// 开始执行Table的Lock操作
-	this.tableRWLock.Lock()
-	defer this.tableRWLock.Unlock()
-
 	// 1. Original Table锁定，不让写入数据
 	//    剩余的binlog，会迅速写入ghost文件中；由于优先处理binlog，且有throttle控制，因此当rows被拷贝完毕时，binlog剩余的也不多
-	if err := this.retryOperation(this.applier.LockGhoOriginTable); err != nil {
+	if err := this.retryOperation(this.applier.LockGhostOriginTable); err != nil {
 		return err
 	}
 
@@ -693,10 +687,6 @@ func (this *Migrator) cutOverTwoStep() (err error) {
 func (this *Migrator) atomicCutOver() (err error) {
 	atomic.StoreInt64(&this.migrationContext.InCutOverCriticalSectionFlag, 1)
 	defer atomic.StoreInt64(&this.migrationContext.InCutOverCriticalSectionFlag, 0)
-
-	this.tableRWLock.Lock()
-	defer this.tableRWLock.Unlock()
-
 	okToUnlockTable := make(chan bool, 4)
 	defer func() {
 		okToUnlockTable <- true
@@ -706,8 +696,6 @@ func (this *Migrator) atomicCutOver() (err error) {
 	atomic.StoreInt64(&this.migrationContext.AllEventsUpToLockProcessedInjectedFlag, 0)
 
 	lockOriginalSessionIdChan := make(chan int64, 2)
-
-	// 为什么要异步执行 AtomicCutOverMagicLock
 	tableLocked := make(chan error, 2)
 	tableUnlocked := make(chan error, 2)
 	go func() {
@@ -791,10 +779,8 @@ func (this *Migrator) initiateServer() (err error) {
 	var f printStatusFunc = func(rule PrintStatusRule, writer io.Writer) {
 		this.printStatus(rule, writer)
 	}
-
 	this.server = NewServer(this.migrationContext, this.hooksExecutor, f)
-
-	// 绑定socket
+	// 绑定socket, socket可以用来接收外部的命令，动态设置参数
 	if err := this.server.BindSocketFile(); err != nil {
 		return err
 	}
@@ -914,6 +900,7 @@ func (this *Migrator) printMigrationStatusHint(writers ...io.Writer) {
 	maxLoad := this.migrationContext.GetMaxLoad()
 	criticalLoad := this.migrationContext.GetCriticalLoad()
 
+	// 彩色打印当前的进度
 	fmt.Fprintln(w, fmt.Sprintf(color.MagentaString("# chunk-size: %+v; max-lag-millis: %+vms; dml-batch-size: %+v; max-load: %s; critical-load: %s; nice-ratio: %f"),
 		atomic.LoadInt64(&this.migrationContext.ChunkSize),
 		atomic.LoadInt64(&this.migrationContext.MaxLagMillisecondsThrottleThreshold),
@@ -1110,13 +1097,13 @@ func (this *Migrator) initiateStreaming() error {
 	if err := this.eventsStreamer.InitDBConnections(); err != nil {
 		return err
 	}
+
+	// 为binlog添加changelog的监听，用来判断是否已经同步完毕所有的binlog
 	this.eventsStreamer.AddListener(
-		false, // 同步处理binlog的变化
+		false,
 		this.migrationContext.DatabaseName,
-		// gt-ost 应用场景: 一次只改一个table, 因此不需要关注其他的tables的变化
 		this.migrationContext.GetChangelogTableName(),
 		func(dmlEvent *binlog.BinlogDMLEvent) error {
-			// 监听state变化
 			return this.onChangelogStateEvent(dmlEvent)
 		},
 	)
@@ -1147,12 +1134,12 @@ func (this *Migrator) initiateStreaming() error {
 // addDMLEventsListener begins listening for binlog events on the original table,
 // and creates & enqueues a write task per such event.
 func (this *Migrator) addDMLEventsListener() error {
+	// 用于监听origin table的binlog
 	err := this.eventsStreamer.AddListener(
 		false,
 		this.migrationContext.DatabaseName,
 		this.migrationContext.OriginalTableName,
 		func(dmlEvent *binlog.BinlogDMLEvent) error {
-			// log.Infof(color.RedString("addDMLEventsListener: %v"), dmlEvent)
 			this.applyEventsQueue <- newApplyEventStructByDML(dmlEvent)
 			return nil
 		},
@@ -1375,27 +1362,19 @@ func (this *Migrator) onApplyEventStruct(eventStruct *applyEventStruct) error {
 // This is where the ghost table gets the data. The function fills the data single-threaded.
 // Both event backlog and rowcopy events are polled; the backlog events have precedence.
 func (this *Migrator) executeWriteFuncs() error {
-	defer func() {
-		log.Infof(color.GreenString("executeWriteFuncs over..."))
-	}()
-	// 如果是dry-run，则直接返回
 	if this.migrationContext.Noop {
 		log.Debugf("Noop operation; not really executing write funcs")
 		return nil
 	}
 	for {
 		if atomic.LoadInt64(&this.finishedMigrating) > 0 {
-			// log.Infof(color.RedString("finishedMigrating...."))
 			return nil
 		}
-
-		// log.Infof(color.GreenString("before throttle"))
 		this.throttler.throttle(nil)
 
 		// We give higher priority to event processing, then secondary priority to
 		// rowcopy
 		// 如何处理select/case的优先级问题
-		// log.Infof(color.RedString("executeWriteFuncs normal loop, queue: %d, %p"), len(this.applyEventsQueue), this.applyEventsQueue)
 		select {
 		case eventStruct := <-this.applyEventsQueue:
 			{
