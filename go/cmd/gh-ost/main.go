@@ -20,6 +20,9 @@ import (
 	"github.com/github/gh-ost/go/sql"
 	"golang.org/x/crypto/ssh/terminal"
 	"path"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 const (
@@ -57,6 +60,8 @@ func main() {
 	fmt.Fprintf(os.Stdout, color.GreenString("# === Begin ===\n"))
 
 	migrationContext := base.GetMigrationContext()
+
+	profilePort := flag.String("profile-port", "", "profile port")
 
 	// hostname, db, username, password等基本上不会经常变化，可以放在某个地方
 	// 通过 dbConfigFile, 可以使用db的alias来简化命令行参数
@@ -398,6 +403,12 @@ func main() {
 	}
 	if err := migrationContext.SetExponentialBackoffMaxInterval(*exponentialBackoffMaxInterval); err != nil {
 		log.Errore(err)
+	}
+
+	if *profilePort != "" {
+		go func() {
+			http.ListenAndServe(fmt.Sprintf("0.0.0.0:%s", *profilePort), nil)
+		}()
 	}
 
 	log.Infof("starting gh-ost %+v", AppVersion)

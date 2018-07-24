@@ -163,6 +163,8 @@ func (this *Applier) ValidateOrDropExistingTables() error {
 			return err
 		}
 	}
+
+	// 验证Drop的结果
 	if len(this.migrationContext.GetOldTableName()) > mysql.MaxTableNameLength {
 		log.Fatalf("--timestamp-old-table defined, but resulting table name (%s) is too long (only %d characters allowed)", this.migrationContext.GetOldTableName(), mysql.MaxTableNameLength)
 	}
@@ -1155,70 +1157,6 @@ func (this *Applier) buildDMLEventQuery(dmlEvent *binlog.BinlogDMLEvent) (result
 	return append(results, newDmlBuildResultError(fmt.Errorf("Unknown dml event type: %+v", dmlEvent.DML)))
 }
 
-// ApplyDMLEventQuery writes an entry to the ghost table, in response to an intercepted
-// original-table binlog event
-func (this *Applier) ApplyDMLEventQuery(dmlEvent *binlog.BinlogDMLEvent) error {
-	for _, buildResult := range this.buildDMLEventQuery(dmlEvent) {
-		if buildResult.err != nil {
-			return buildResult.err
-		}
-		// TODO The below is in preparation for transactional writes on the ghost tables.
-		// Such writes would be, for example:
-		// - prepended with sql_mode setup
-		// - prepended with time zone setup
-		// - prepended with SET SQL_LOG_BIN=0
-		// - prepended with SET FK_CHECKS=0
-		// etc.
-		//
-		// a known problem: https://github.com/golang/go/issues/9373 -- bitint unsigned values, not supported in database/sql
-		// is solved by silently converting unsigned bigints to string values.
-		//
-
-		err := func() error {
-			this.WriteLock.Lock()
-			defer this.WriteLock.Unlock()
-
-			var tx *gosql.Tx
-			var err error
-			if this.WriteLocked {
-				// 写锁定的情况下，只有singletonDB有写权限
-				tx, err = this.singletonDB.Begin()
-			} else {
-				tx, err = this.db.Begin()
-			}
-
-			if err != nil {
-				return err
-			}
-			sessionQuery := `SET
-			SESSION time_zone = '+00:00',
-			sql_mode = CONCAT(@@session.sql_mode, ',STRICT_ALL_TABLES')
-			`
-			if _, err := tx.Exec(sessionQuery); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(buildResult.query, buildResult.args...); err != nil {
-				return err
-			}
-			if err := tx.Commit(); err != nil {
-				return err
-			}
-			return nil
-		}()
-
-		if err != nil {
-			err = fmt.Errorf("%s; query=%s; args=%+v", err.Error(), buildResult.query, buildResult.args)
-			return log.Errore(err)
-		}
-		// no error
-		atomic.AddInt64(&this.migrationContext.TotalDMLEventsApplied, 1)
-		if this.migrationContext.CountTableRows {
-			atomic.AddInt64(&this.migrationContext.RowsDeltaEstimate, buildResult.rowsDelta)
-		}
-	}
-	return nil
-}
-
 // ApplyDMLEventQueries applies multiple DML queries onto the _ghost_ table
 func (this *Applier) ApplyDMLEventQueries(dmlEvents [](*binlog.BinlogDMLEvent)) error {
 
@@ -1232,6 +1170,7 @@ func (this *Applier) ApplyDMLEventQueries(dmlEvents [](*binlog.BinlogDMLEvent)) 
 		var err error
 		if this.WriteLocked {
 			// 写锁定的情况下，只有singletonDB有写权限
+			log.Infof(color.CyanString("New %d dmlEvents write to singletonDB"), len(dmlEvents))
 			tx, err = this.singletonDB.Begin()
 		} else {
 			tx, err = this.db.Begin()
@@ -1273,6 +1212,9 @@ func (this *Applier) ApplyDMLEventQueries(dmlEvents [](*binlog.BinlogDMLEvent)) 
 			}
 		}
 		if err := tx.Commit(); err != nil {
+			if this.WriteLocked {
+				log.Infof(color.CyanString("New %d dmlEvents write to singletonDB failed with error: %v"), len(dmlEvents), err)
+			}
 			return err
 		}
 		return nil
