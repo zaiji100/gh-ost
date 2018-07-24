@@ -61,6 +61,8 @@ func main() {
 
 	migrationContext := base.GetMigrationContext()
 
+	profilePort := flag.String("profile-port", "", "profile port")
+
 	// hostname, db, username, password等基本上不会经常变化，可以放在某个地方
 	// 通过 dbConfigFile, 可以使用db的alias来简化命令行参数
 	dbAlias := flag.String("db-alias", "", "db alias in db conf file")
@@ -403,9 +405,11 @@ func main() {
 		log.Errore(err)
 	}
 
-	go func() {
-		http.ListenAndServe("0.0.0.0:8080", nil)
-	}()
+	if *profilePort != "" {
+		go func() {
+			http.ListenAndServe(fmt.Sprintf("0.0.0.0:%s", *profilePort), nil)
+		}()
+	}
 
 	log.Infof("starting gh-ost %+v", AppVersion)
 	acceptSignals(migrationContext)
