@@ -77,7 +77,6 @@ func NewBinlogSyncer(cfg BinlogSyncerConfig) *BinlogSyncer {
 	data, _ := json.Marshal(cfg)
 	log.Infof("create BinlogSyncer with config %s", color.BlueString(string(data)))
 
-
 	b := new(BinlogSyncer)
 
 	b.cfg = cfg
@@ -493,7 +492,10 @@ func (b *BinlogSyncer) onStream(s *BinlogStreamer) {
 	for {
 		data, err := b.c.ReadPacket()
 		if err != nil {
-			log.Error(err)
+			// 只有处于Running状态时，才打印错误日志
+			if b.running {
+				log.Error(err)
+			}
 
 			// we meet connection error, should re-connect again with
 			// last nextPos we got.

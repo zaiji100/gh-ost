@@ -85,14 +85,16 @@ func (this *EventsStreamer) notifyListeners(binlogEvent *binlog.BinlogDMLEvent) 
 	this.listenersMutex.Lock()
 	defer this.listenersMutex.Unlock()
 
-	// 如何通知listeners呢?
+	// 如何通知listeners呢? 按照加入的先后顺序来通知
+	dbNameLower := strings.ToLower(binlogEvent.DatabaseName)
+	tableNameLower := strings.ToLower(binlogEvent.TableName)
 	for _, listener := range this.listeners {
 		listener := listener
 		// DB和Table一致，可以做一个预处理, 把listener的names都统一为小写
-		if strings.ToLower(listener.databaseName) != strings.ToLower(binlogEvent.DatabaseName) {
+		if strings.ToLower(listener.databaseName) != dbNameLower {
 			continue
 		}
-		if strings.ToLower(listener.tableName) != strings.ToLower(binlogEvent.TableName) {
+		if strings.ToLower(listener.tableName) != tableNameLower {
 			continue
 		}
 

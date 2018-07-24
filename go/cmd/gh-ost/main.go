@@ -20,6 +20,9 @@ import (
 	"github.com/github/gh-ost/go/sql"
 	"golang.org/x/crypto/ssh/terminal"
 	"path"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 const (
@@ -399,6 +402,10 @@ func main() {
 	if err := migrationContext.SetExponentialBackoffMaxInterval(*exponentialBackoffMaxInterval); err != nil {
 		log.Errore(err)
 	}
+
+	go func() {
+		http.ListenAndServe("0.0.0.0:8080", nil)
+	}()
 
 	log.Infof("starting gh-ost %+v", AppVersion)
 	acceptSignals(migrationContext)

@@ -14,12 +14,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/github/gh-ost/go/base"
 	"github.com/github/gh-ost/go/binlog"
 	"github.com/github/gh-ost/go/mysql"
 	"github.com/github/gh-ost/go/sql"
-
-	"github.com/fatih/color"
 	"github.com/outbrain/golib/log"
 )
 
@@ -89,7 +88,9 @@ type Migrator struct {
 	rowCopyComplete            chan error
 	allEventsUpToLockProcessed chan string
 
-	rowCopyCompleteFlag int64
+	rowCopyCompleteFlag *AtomicBool // 批量数据拷贝完毕
+	binlogReceived      *AtomicBool // binlog都同步过来了，但不一定"落盘"
+	binlogApplied       *AtomicBool // 在 binlogReceived 的前提下，数据都被同步到 ghost table中
 
 	// copyRowsQueue should not be buffered; if buffered some non-damaging but
 	//  excessive work happens at the end of the iteration as new copy-jobs arrive befroe realizing the copy is complete
@@ -114,6 +115,9 @@ func NewMigrator(context *base.MigrationContext) *Migrator {
 		applyEventsQueue:       make(chan *applyEventStruct, base.MaxEventsBatchSize),
 		handledChangelogStates: make(map[string]bool),
 		finishedMigrating:      0,
+		rowCopyCompleteFlag:    &AtomicBool{},
+		binlogReceived:         &AtomicBool{},
+		binlogApplied:          &AtomicBool{},
 	}
 	return migrator
 }
@@ -210,7 +214,8 @@ func (this *Migrator) consumeRowCopyComplete() {
 	if err := <-this.rowCopyComplete; err != nil {
 		this.migrationContext.PanicAbort <- err
 	}
-	atomic.StoreInt64(&this.rowCopyCompleteFlag, 1)
+
+	this.rowCopyCompleteFlag.Set(true)
 	this.migrationContext.MarkRowCopyEndTime()
 	go func() {
 		for err := range this.rowCopyComplete {
@@ -439,7 +444,7 @@ func (this *Migrator) Migrate() (err error) {
 	// 开始执行拷贝操作
 	// 1. binlog的同步
 	go this.executeWriteFuncs()
-	// 2. 批量操作
+	// 2. "批量拷贝数据"
 	go this.iterateChunks()
 
 	this.migrationContext.MarkRowCopyStartTime()
@@ -447,7 +452,7 @@ func (this *Migrator) Migrate() (err error) {
 
 	log.Debugf("Operating until row copy is complete")
 
-	// 等待迁移完毕
+	// 2. "批量拷贝数据"处理完毕
 	this.consumeRowCopyComplete()
 	this.migrationContext.RowCopyComplete.Store(true)
 
@@ -467,7 +472,10 @@ func (this *Migrator) Migrate() (err error) {
 	} else {
 		retrier = this.retryOperation
 	}
-	// 迁移完毕之后进行cutOver
+
+	// TODO: // 1. binlog的同步
+	// 需要考虑"增量数据安全同步"完毕，然后做表的swap/cutover
+	// 同步完毕：收到binlog，并成功地将binlog写入ghost table中
 	if err := retrier(this.cutOver); err != nil {
 		return err
 	}
@@ -536,9 +544,13 @@ func (this *Migrator) cutOver() (err error) {
 	})
 
 	this.migrationContext.MarkPointOfInterest()
+
+	// 等待CutOver的外部条件
 	log.Debugf("checking for cut-over postpone")
 	this.sleepWhileTrue(
 		func() (bool, error) {
+			// --postpone-cut-over-flag-file 没有指定，或指定的文件不存在
+			// 或者通过socket command来控制是否需要cutover
 			if this.migrationContext.PostponeCutOverFlagFile == "" {
 				return false, nil
 			}
@@ -602,7 +614,11 @@ func (this *Migrator) cutOver() (err error) {
 // Inject the "AllEventsUpToLockProcessed" state hint, wait for it to appear in the binary logs,
 // make sure the queue is drained.
 func (this *Migrator) waitForEventsUpToLock() (err error) {
-	// log.Infof(color.CyanString("Enter waitForEventsUpToLock..."))
+	// 等待两件事情的发生：
+	// lock origin table之后，需要确保：
+	// 1. gh-ost收到所有的binlog，因此通过主动发送，监听 allEventsUpToLockProcessedChallenge 来确保收到所有的binlog
+	// 2. 确保所有的和origin table相关的binlog, 都被apply到ghost table中(能落地）
+	// 1, 2发生之后，就可以安全地进行数据的切换了
 	timeout := time.NewTimer(time.Second * time.Duration(this.migrationContext.CutOverLockTimeoutSeconds))
 
 	this.migrationContext.MarkPointOfInterest()
@@ -642,6 +658,18 @@ func (this *Migrator) waitForEventsUpToLock() (err error) {
 
 	log.Infof("D: Done waiting for events up to lock; duration=%+v", waitForEventsUpToLockDuration)
 	this.printStatus(ForcePrintStatusAndHintRule)
+
+	this.binlogReceived.Set(true)
+	// 正常情况下，做一些等待
+
+	log.Infof(color.GreenString("binlog receive complete, waiting for binlogApply done"))
+	for i := 0; i < 100; i++ {
+		if this.binlogApplied.Get() {
+			break
+		} else {
+			time.Sleep(time.Millisecond * 10) // 1s应该足够同步剩下的binlog了
+		}
+	}
 
 	return nil
 }
@@ -975,7 +1003,7 @@ func (this *Migrator) printStatus(rule PrintStatusRule, writers ...io.Writer) {
 	elapsedSeconds := int64(elapsedTime.Seconds())
 	totalRowsCopied := this.migrationContext.GetTotalRowsCopied()
 	rowsEstimate := atomic.LoadInt64(&this.migrationContext.RowsEstimate) + atomic.LoadInt64(&this.migrationContext.RowsDeltaEstimate)
-	if atomic.LoadInt64(&this.rowCopyCompleteFlag) == 1 {
+	if this.rowCopyCompleteFlag.Get() {
 		// Done copying rows. The totalRowsCopied value is the de-facto number of rows,
 		// and there is no further need to keep updating the value.
 		rowsEstimate = totalRowsCopied
@@ -1179,7 +1207,7 @@ func (this *Migrator) initiateApplier() error {
 	if err := this.applier.ValidateOrDropExistingTables(); err != nil {
 		return err
 	}
-
+	log.Infof(color.GreenString("drop old tables done"))
 	// Changelog 和 Ghost的关系?
 	if err := this.applier.CreateChangelogTable(); err != nil {
 		log.Errorf("Unable to create changelog table, see further error details. Perhaps a previous migration failed without dropping the table? OR is there a running migration? Bailing out")
@@ -1203,27 +1231,11 @@ func (this *Migrator) initiateApplier() error {
 	return nil
 }
 
-type TAtomBool struct{ flag int32 }
-
-func (b *TAtomBool) Set(value bool) {
-	var i int32 = 0
-	if value {
-		i = 1
-	}
-	atomic.StoreInt32(&(b.flag), int32(i))
-}
-func (b *TAtomBool) Get() bool {
-	if atomic.LoadInt32(&(b.flag)) != 0 {
-		return true
-	}
-	return false
-}
-
 // iterateChunks iterates the existing table rows, and generates a copy task of
 // a chunk of rows onto the ghost table.
 func (this *Migrator) iterateChunks() error {
 	// Iterate per chunk:
-	rowRangeComplete := &TAtomBool{}
+	rowRangeComplete := &AtomicBool{}
 
 	terminateRowIteration := func(err error) error {
 		rowRangeComplete.Set(true)
@@ -1240,7 +1252,7 @@ func (this *Migrator) iterateChunks() error {
 	}
 
 	for {
-		if atomic.LoadInt64(&this.rowCopyCompleteFlag) == 1 {
+		if this.rowCopyCompleteFlag.Get() {
 			// Done
 			// There's another such check down the line
 			return nil
@@ -1249,7 +1261,7 @@ func (this *Migrator) iterateChunks() error {
 			//defer func() {
 			//	log.Infof(color.CyanString("copyRowsFunc over"))
 			//}()
-			if atomic.LoadInt64(&this.rowCopyCompleteFlag) == 1 || rowRangeComplete.Get() {
+			if this.rowCopyCompleteFlag.Get() || rowRangeComplete.Get() {
 				// Done.
 				// There's another such check down the line
 				return nil
@@ -1266,7 +1278,7 @@ func (this *Migrator) iterateChunks() error {
 			}
 			// Copy task:
 			applyCopyRowsFunc := func() error {
-				if atomic.LoadInt64(&this.rowCopyCompleteFlag) == 1 || rowRangeComplete.Get() {
+				if this.rowCopyCompleteFlag.Get() || rowRangeComplete.Get() {
 					// No need for more writes.
 					// This is the de-facto place where we avoid writing in the event of completed cut-over.
 					// There could _still_ be a race condition, but that's as close as we can get.
@@ -1371,10 +1383,15 @@ func (this *Migrator) onApplyEventStruct(eventStruct *applyEventStruct) error {
 // This is where the ghost table gets the data. The function fills the data single-threaded.
 // Both event backlog and rowcopy events are polled; the backlog events have precedence.
 func (this *Migrator) executeWriteFuncs() error {
+
+	defer this.binlogApplied.Set(true)
+
 	if this.migrationContext.Noop {
 		log.Debugf("Noop operation; not really executing write funcs")
 		return nil
 	}
+	binlogReceiveComplete := false
+	waitIndex := 0
 	for {
 		if atomic.LoadInt64(&this.finishedMigrating) > 0 {
 			return nil
@@ -1421,10 +1438,26 @@ func (this *Migrator) executeWriteFuncs() error {
 					}
 				default:
 					{
-						// Hmmmmm... nothing in the queue; no events, but also no row copy.
-						// This is possible upon load. Let's just sleep it over.
-						log.Infof(color.RedString("Getting nothing in the write queue. Sleeping..."))
-						time.Sleep(time.Second)
+
+						if binlogReceiveComplete {
+							log.Infof(color.GreenString("BinlogReceived and has appplied"))
+							return nil
+						}
+
+						// 如果binlog接收完毕，则再给上面的chan一次读取的机会(避免race condition)
+						if this.binlogReceived.Get() {
+							binlogReceiveComplete = true
+						} else {
+							// Hmmmmm... nothing in the queue; no events, but also no row copy.
+							// This is possible upon load. Let's just sleep it over.
+							waitIndex++
+							if waitIndex%100 == 0 {
+								// 控制一下log的频率
+								log.Infof(color.RedString("Getting nothing in the write queue. Sleeping..."))
+							}
+							time.Sleep(time.Millisecond * 10)
+						}
+
 					}
 				}
 			}
