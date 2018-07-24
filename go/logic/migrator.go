@@ -632,7 +632,8 @@ func (this *Migrator) waitForEventsUpToLock() (err error) {
 		//log.Errorf("WriteChangelogState error: %v", err)
 		return err
 	}
-	//log.Infof("B: Waiting for events up to lock")
+
+	log.Infof(color.CyanString("Waiting for events up to lock"))
 	atomic.StoreInt64(&this.migrationContext.AllEventsUpToLockProcessedInjectedFlag, 1)
 
 	for found := false; !found; {
@@ -646,23 +647,23 @@ func (this *Migrator) waitForEventsUpToLock() (err error) {
 				log.Infof("state: %s vs. %s", state, allEventsUpToLockProcessedChallenge)
 				// 通过binlog收到消息，表明lock之前所有的events都收到了
 				if state == allEventsUpToLockProcessedChallenge {
-					log.Infof("C: Waiting for events up to lock: got %s", state)
+					log.Infof("Waiting for events up to lock: got %s", state)
 					found = true
 				} else {
-					log.Infof("C: Waiting for events up to lock: skipping %s", state)
+					log.Infof("Waiting for events up to lock: skipping %s", state)
 				}
 			}
 		}
 	}
 	waitForEventsUpToLockDuration := time.Since(waitForEventsUpToLockStartTime)
 
-	log.Infof("D: Done waiting for events up to lock; duration=%+v", waitForEventsUpToLockDuration)
+	log.Infof(color.GreenString("Done waiting for events up to lock; duration=%+v"), waitForEventsUpToLockDuration)
 	this.printStatus(ForcePrintStatusAndHintRule)
 
 	this.binlogReceived.Set(true)
 	// 正常情况下，做一些等待
 
-	log.Infof(color.GreenString("binlog receive complete, waiting for binlogApply done"))
+	log.Infof(color.CyanString("binlog receive complete, waiting for binlog apply done..."))
 	for i := 0; i < 100; i++ {
 		if this.binlogApplied.Get() {
 			break
@@ -670,6 +671,7 @@ func (this *Migrator) waitForEventsUpToLock() (err error) {
 			time.Sleep(time.Millisecond * 10) // 1s应该足够同步剩下的binlog了
 		}
 	}
+	log.Infof(color.GreenString("binlog receive complete, binlog apply done"))
 
 	return nil
 }
