@@ -1275,8 +1275,15 @@ func (this *Migrator) iterateChunks() error {
 						return err
 					}
 
+					if this.migrationContext.OriginalFilter != "" {
+						// 如果 OriginalFilter 存在，则 rowsAffected 可能偏少，不利于进度估计，因此直接使用 chunkSize 来代替
+						chunkSize := atomic.LoadInt64(&this.migrationContext.ChunkSize)
+						atomic.AddInt64(&this.migrationContext.TotalRowsCopied, chunkSize)
+					} else {
+						atomic.AddInt64(&this.migrationContext.TotalRowsCopied, rowsAffected)
+					}
+
 					// 更改统计数据
-					atomic.AddInt64(&this.migrationContext.TotalRowsCopied, rowsAffected)
 					atomic.AddInt64(&this.migrationContext.Iteration, 1)
 					return nil
 				}
