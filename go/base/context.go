@@ -81,7 +81,8 @@ type MigrationContext struct {
 
 	// 新增字段
 	OriginalFilter string
-	Partition      *sql.Partition
+	PartitionInfos []*sql.PartitionInfo
+	PartitionOpt   bool
 
 	CountTableRows           bool
 	ConcurrentCountTableRows bool

@@ -14,12 +14,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"errors"
 	"github.com/fatih/color"
 	"github.com/github/gh-ost/go/base"
 	"github.com/github/gh-ost/go/binlog"
 	"github.com/github/gh-ost/go/mysql"
 	"github.com/github/gh-ost/go/sql"
 	"github.com/outbrain/golib/log"
+	"sync"
 )
 
 type ChangelogState string
@@ -431,9 +433,12 @@ func (this *Migrator) Migrate() (err error) {
 	}
 
 	// 获取key的range
-	if err := this.applier.ReadMigrationRangeValues(); err != nil {
-		return err
+	if len(this.migrationContext.PartitionInfos) == 0 {
+		if err := this.applier.ReadMigrationRangeValues(nil); err != nil {
+			return err
+		}
 	}
+
 	if err := this.initiateThrottler(); err != nil {
 		return err
 	}
@@ -594,21 +599,11 @@ func (this *Migrator) cutOver() (err error) {
 	}
 
 	// 优先考虑：一步就CutOver
-	if this.migrationContext.Partition == nil && this.migrationContext.CutOverType == base.CutOverAtomic {
-		// Atomic solution: we use low timeout and multiple attempts. But for
-		// each failed attempt, we throttle until replication lag is back to normal
-		err := this.atomicCutOver()
-		this.handleCutOverResult(err)
-		return err
-	}
-
-	// 如果支持Partition，或者两步Cut
-	if this.migrationContext.Partition != nil || this.migrationContext.CutOverType == base.CutOverTwoStep {
-		err := this.cutOverTwoStep()
-		this.handleCutOverResult(err)
-		return err
-	}
-	return log.Fatalf("Unknown cut-over type: %d; should never get here!", this.migrationContext.CutOverType)
+	// Atomic solution: we use low timeout and multiple attempts. But for
+	// each failed attempt, we throttle until replication lag is back to normal
+	err = this.atomicCutOver()
+	this.handleCutOverResult(err)
+	return err
 }
 
 // Inject the "AllEventsUpToLockProcessed" state hint, wait for it to appear in the binary logs,
@@ -673,43 +668,6 @@ func (this *Migrator) waitForEventsUpToLock() (err error) {
 	}
 	log.Infof(color.GreenString("binlog receive complete, binlog apply done"))
 
-	return nil
-}
-
-// cutOverTwoStep will lock down the original table, execute
-// what's left of last DML entries, and **non-atomically** swap original->old, then new->original.
-// There is a point in time where the "original" table does not exist and queries are non-blocked
-// and failing.
-func (this *Migrator) cutOverTwoStep() (err error) {
-	atomic.StoreInt64(&this.migrationContext.InCutOverCriticalSectionFlag, 1)
-	defer atomic.StoreInt64(&this.migrationContext.InCutOverCriticalSectionFlag, 0)
-	atomic.StoreInt64(&this.migrationContext.AllEventsUpToLockProcessedInjectedFlag, 0)
-
-	// 1. Original Table锁定，不让写入数据
-	//    剩余的binlog，会迅速写入ghost文件中；由于优先处理binlog，且有throttle控制，因此当rows被拷贝完毕时，binlog剩余的也不多
-	if err := this.retryOperation(this.applier.LockGhostOriginTable); err != nil {
-		return err
-	}
-
-	// 2. 确保lock之前所有的binlog已经收到，并且processed
-	if err := this.retryOperation(this.waitForEventsUpToLock); err != nil {
-		return err
-	}
-
-	// 3. 交换table
-	if err := this.retryOperation(this.applier.SwapTablesQuickAndBumpy); err != nil {
-		return err
-	}
-
-	// 4. 当前Session释放locks
-	if err := this.retryOperation(this.applier.UnlockTables); err != nil {
-		return err
-	}
-
-	// 5. 打印执行情况
-	lockAndRenameDuration := this.migrationContext.RenameTablesEndTime.Sub(this.migrationContext.LockTablesStartTime)
-	renameDuration := this.migrationContext.RenameTablesEndTime.Sub(this.migrationContext.RenameTablesStartTime)
-	log.Debugf("Lock & rename duration: %s (rename only: %s). During this time, queries on %s were locked or failing", lockAndRenameDuration, renameDuration, sql.EscapeName(this.migrationContext.OriginalTableName))
 	return nil
 }
 
@@ -1011,14 +969,6 @@ func (this *Migrator) printStatus(rule PrintStatusRule, writers ...io.Writer) {
 		rowsEstimate = totalRowsCopied
 	}
 
-	// 估计值做一个纠正
-	if this.migrationContext.Partition != nil {
-		rowsEstimate = rowsEstimate / this.migrationContext.Partition.PartitionNum
-	}
-	if rowsEstimate == 0 {
-		rowsEstimate = 1
-	}
-
 	var progressPct float64
 	if rowsEstimate == 0 {
 		progressPct = 100.0
@@ -1238,80 +1188,136 @@ func (this *Migrator) initiateApplier() error {
 func (this *Migrator) iterateChunks() error {
 	// Iterate per chunk:
 	rowRangeComplete := &AtomicBool{}
+	rowRangeError := &AtomicBool{}
 
 	terminateRowIteration := func(err error) error {
 		rowRangeComplete.Set(true)
+		log.Errorf("terminateRowIteration err: %v", err)
+		if err != nil {
+			rowRangeError.Set(true)
+		}
 		this.rowCopyComplete <- err
-		return log.Errore(err)
+		return err
 	}
 	if this.migrationContext.Noop {
 		log.Debugf("Noop operation; not really copying data")
 		return terminateRowIteration(nil)
 	}
-	if this.migrationContext.MigrationRangeMinValues == nil {
-		log.Debugf("No rows found in table. Rowcopy will be implicitly empty")
-		return terminateRowIteration(nil)
-	}
 
-	for {
-		if this.rowCopyCompleteFlag.Get() {
-			// Done
-			// There's another such check down the line
+	// 处理单独的一个partition
+	partitionIter := func(partition *sql.PartitionInfo) error {
+		// log.Infof(color.CyanString("partitionIter %s"), partition.String())
+
+		// 没有数据，直接返回
+		if this.migrationContext.MigrationRangeMinValues == nil {
 			return nil
 		}
-		copyRowsFunc := func() error {
-			//defer func() {
-			//	log.Infof(color.CyanString("copyRowsFunc over"))
-			//}()
+
+		// 如何等待上一个partition处理完毕呢？
+		rowRangeComplete.Set(false)
+
+		copyRowsWg := &sync.WaitGroup{}
+		for {
 			if this.rowCopyCompleteFlag.Get() || rowRangeComplete.Get() {
-				// Done.
+				// Done
 				// There's another such check down the line
-				return nil
+				break
 			}
 
-			// 计算当前iteration的range
-			// 需要注意所的问题：
-			hasFurtherRange, err := this.applier.CalculateNextIterationRangeEndValues()
-			if err != nil {
-				return terminateRowIteration(err)
-			}
-			if !hasFurtherRange {
-				return terminateRowIteration(nil)
-			}
-			// Copy task:
-			applyCopyRowsFunc := func() error {
+			copyRowsWg.Add(1)
+			copyRowsFunc := func() error {
+				defer copyRowsWg.Done()
+
 				if this.rowCopyCompleteFlag.Get() || rowRangeComplete.Get() {
-					// No need for more writes.
-					// This is the de-facto place where we avoid writing in the event of completed cut-over.
-					// There could _still_ be a race condition, but that's as close as we can get.
-					// What about the race condition? Well, there's actually no data integrity issue.
-					// when rowCopyCompleteFlag==1 that means **guaranteed** all necessary rows have been copied.
-					// But some are still then collected at the binary log, and these are the ones we're trying to
-					// not apply here. If the race condition wins over us, then we just attempt to apply onto the
-					// _ghost_ table, which no longer exists. So, bothering error messages and all, but no damage.
-					//log.Infof("rowCopyCompleteFlag: 1")
+					// Done.
+					// There's another such check down the line
 					return nil
 				}
 
-				_, rowsAffected, _, err := this.applier.ApplyIterationInsertQuery()
+				// 计算当前iteration的range
+				// 需要注意所的问题：
+				hasFurtherRange, err := this.applier.CalculateNextIterationRangeEndValues(partition)
 				if err != nil {
 					return terminateRowIteration(err)
 				}
+				if !hasFurtherRange {
+					rowRangeComplete.Set(true) // 没有数据了，则本轮循环可以关闭
+					return nil
+				}
+				// Copy task:
+				applyCopyRowsFunc := func() error {
+					if this.rowCopyCompleteFlag.Get() || rowRangeComplete.Get() {
+						// No need for more writes.
+						// This is the de-facto place where we avoid writing in the event of completed cut-over.
+						// There could _still_ be a race condition, but that's as close as we can get.
+						// What about the race condition? Well, there's actually no data integrity issue.
+						// when rowCopyCompleteFlag==1 that means **guaranteed** all necessary rows have been copied.
+						// But some are still then collected at the binary log, and these are the ones we're trying to
+						// not apply here. If the race condition wins over us, then we just attempt to apply onto the
+						// _ghost_ table, which no longer exists. So, bothering error messages and all, but no damage.
+						//log.Infof("rowCopyCompleteFlag: 1")
+						return nil
+					}
 
-				// 更改统计数据
-				atomic.AddInt64(&this.migrationContext.TotalRowsCopied, rowsAffected)
-				atomic.AddInt64(&this.migrationContext.Iteration, 1)
+					_, rowsAffected, _, err := this.applier.ApplyIterationInsertQuery(partition)
+					if err != nil {
+						return terminateRowIteration(err)
+					}
+
+					// 更改统计数据
+					atomic.AddInt64(&this.migrationContext.TotalRowsCopied, rowsAffected)
+					atomic.AddInt64(&this.migrationContext.Iteration, 1)
+					return nil
+				}
+				if err := this.retryOperation(applyCopyRowsFunc); err != nil {
+					return terminateRowIteration(err)
+				}
 				return nil
 			}
-			if err := this.retryOperation(applyCopyRowsFunc); err != nil {
-				return terminateRowIteration(err)
-			}
-			return nil
+			// Enqueue copy operation; to be executed by executeWriteFuncs()
+			this.copyRowsQueue <- copyRowsFunc
 		}
-		// Enqueue copy operation; to be executed by executeWriteFuncs()
-		this.copyRowsQueue <- copyRowsFunc
+
+		copyRowsWg.Wait() // 等待当前的Task执行完毕
+		log.Infof(color.GreenString("PartitionIter complete for partition: %s"), partition.PartitionName)
+
+		return nil
 	}
-	return nil
+
+	// 遍历处理所有的PartitionInfos
+	if len(this.migrationContext.PartitionInfos) == 0 {
+		if this.migrationContext.MigrationRangeMinValues == nil {
+			log.Debugf("No rows found in table. Rowcopy will be implicitly empty")
+			return terminateRowIteration(nil)
+		}
+
+		return partitionIter(nil)
+	}
+	for _, partitionInfo := range this.migrationContext.PartitionInfos {
+		if rowRangeError.Get() {
+			return errors.New("row range error")
+		}
+
+		log.Infof(color.RedString("Processing partition: %s"), partitionInfo.String())
+
+		// 重置状态
+		this.migrationContext.MigrationRangeMinValues = nil
+		this.migrationContext.MigrationRangeMaxValues = nil
+		this.migrationContext.MigrationIterationRangeMaxValues = nil
+		this.migrationContext.MigrationIterationRangeMinValues = nil
+		atomic.StoreInt64(&this.migrationContext.Iteration, 0) // 重新开始迭代
+
+		if err := this.applier.ReadMigrationRangeValues(partitionInfo); err != nil {
+			return err
+		}
+
+		// 一次一个Partition来处理
+		err := partitionIter(partitionInfo)
+		if err != nil {
+			return err
+		}
+	}
+	return terminateRowIteration(nil)
 }
 
 func (this *Migrator) onApplyEventStruct(eventStruct *applyEventStruct) error {
@@ -1422,11 +1428,12 @@ func (this *Migrator) executeWriteFuncs() error {
 						copyRowsStartTime := time.Now()
 						//log.Infof(color.GreenString("copyRowsFunc begin"))
 						// Retries are handled within the copyRowsFunc
+						// 为什么数据库访问会被阻塞呢？
 						if err := copyRowsFunc(); err != nil {
 
-							//log.Infof(color.GreenString("copyRowsFunc error: %v"), err)
+							log.Infof(color.GreenString("copyRowsFunc error: %v"), err)
 
-							return log.Errore(err)
+							return err
 						}
 
 						//log.Infof(color.GreenString("copyRowsFunc finished"))

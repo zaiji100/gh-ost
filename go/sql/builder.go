@@ -7,7 +7,6 @@ package sql
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 )
@@ -23,39 +22,13 @@ const (
 	NotEqualsComparisonSign           ValueComparisonSign = "!="
 )
 
-// 参考：https://dev.mysql.com/doc/refman/5.6/en/partitioning-management-exchange.html
-type Partition struct {
-	DBField        string // 根据哪个字段做partition
-	PartitionIndex int64  // 要整理的partition
-	PartitionNum   int64  // 总共拥有的partition的数量
+type PartitionInfo struct {
+	PartitionName string
+	TableRows     int64
 }
 
-// Partition:
-//   field:partition_index:partition_num
-func NewPartition(v string) *Partition {
-
-	fileds := strings.Split(v, ":")
-	if len(fileds) != 3 {
-		panic("Invalid partition specification: field:partition_index:partition_num")
-	}
-
-	index, err := strconv.ParseInt(fileds[1], 10, 64)
-	if err != nil {
-		msg := fmt.Sprintf("Partition index parse error: %v", err)
-		log.Printf("Msg: %s", msg)
-		panic(msg)
-	}
-	num, err := strconv.ParseInt(fileds[2], 10, 64)
-	if err != nil {
-		msg := fmt.Sprintf("Partition number parse error: %v", err)
-		log.Printf("Msg: %s", msg)
-		panic(msg)
-	}
-	return &Partition{
-		DBField:        fileds[0],
-		PartitionIndex: index,
-		PartitionNum:   num,
-	}
+func (p *PartitionInfo) String() string {
+	return fmt.Sprintf("{Name: %s, Rows: %d}", p.PartitionName, p.TableRows)
 }
 
 // EscapeName will escape a db/table/column/... name by wrapping with backticks.
@@ -226,7 +199,7 @@ func BuildRangePreparedComparison(columns *ColumnList, args []interface{}, compa
 // originFilterCondition 在做schema migration是顺便将数据做个过滤，例如：可以扔掉一周一样的数据
 // 直接删除大量数据实在不方便，效率低，而且需要整理再进行optimize; 可以通过gh-ost一步到位
 //
-func BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName string, partition *Partition, originFilterCondition string,
+func BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName string, partition *PartitionInfo, originFilterCondition string,
 	sharedColumns []string,
 	mappedSharedColumns []string, uniqueKey string, uniqueKeyColumns *ColumnList,
 	rangeStartValues, rangeEndValues []string, rangeStartArgs, rangeEndArgs []interface{},
@@ -284,7 +257,7 @@ func BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName strin
 	//
 	partitionInfo := ""
 	if partition != nil {
-		partitionInfo = fmt.Sprintf("partition(p%d)", partition.PartitionIndex)
+		partitionInfo = fmt.Sprintf("partition(%s)", partition.PartitionName)
 	}
 
 	result = fmt.Sprintf(`
@@ -298,7 +271,7 @@ func BuildRangeInsertQuery(databaseName, originalTableName, ghostTableName strin
 	return result, explodedArgs, nil
 }
 
-func BuildRangeInsertPreparedQuery(databaseName, originalTableName, ghostTableName string, partition *Partition, originFilterCondition string,
+func BuildRangeInsertPreparedQuery(databaseName, originalTableName, ghostTableName string, partition *PartitionInfo, originFilterCondition string,
 	sharedColumns []string, mappedSharedColumns []string, uniqueKey string, uniqueKeyColumns *ColumnList,
 	rangeStartArgs, rangeEndArgs []interface{}, includeRangeStartValues bool,
 	transactionalTable bool) (result string, explodedArgs []interface{}, err error) {
@@ -314,7 +287,7 @@ func BuildRangeInsertPreparedQuery(databaseName, originalTableName, ghostTableNa
 		includeRangeStartValues, transactionalTable)
 }
 
-func BuildUniqueKeyRangeEndPreparedQueryViaOffset(databaseName, tableName string, partition *Partition, uniqueKeyColumns *ColumnList, rangeStartArgs, rangeEndArgs []interface{}, chunkSize int64, includeRangeStartValues bool, hint string) (result string, explodedArgs []interface{}, err error) {
+func BuildUniqueKeyRangeEndPreparedQueryViaOffset(databaseName, tableName string, partition *PartitionInfo, uniqueKeyColumns *ColumnList, rangeStartArgs, rangeEndArgs []interface{}, chunkSize int64, includeRangeStartValues bool, hint string) (result string, explodedArgs []interface{}, err error) {
 	if uniqueKeyColumns.Len() == 0 {
 		return "", explodedArgs, fmt.Errorf("Got 0 columns in BuildUniqueKeyRangeEndPreparedQuery")
 	}
@@ -351,7 +324,7 @@ func BuildUniqueKeyRangeEndPreparedQueryViaOffset(databaseName, tableName string
 	}
 	partitionInfo := ""
 	if partition != nil {
-		partitionInfo = fmt.Sprintf("partition(p%d)", partition.PartitionIndex)
+		partitionInfo = fmt.Sprintf("partition(%s)", partition.PartitionName)
 	}
 	result = fmt.Sprintf(`
 				select  /* gh-ost %s.%s %s */
@@ -373,7 +346,7 @@ func BuildUniqueKeyRangeEndPreparedQueryViaOffset(databaseName, tableName string
 	return result, explodedArgs, nil
 }
 
-func BuildUniqueKeyRangeEndPreparedQueryViaTemptable(databaseName, tableName string, partition *Partition, uniqueKeyColumns *ColumnList, rangeStartArgs, rangeEndArgs []interface{}, chunkSize int64, includeRangeStartValues bool, hint string) (result string, explodedArgs []interface{}, err error) {
+func BuildUniqueKeyRangeEndPreparedQueryViaTemptable(databaseName, tableName string, partition *PartitionInfo, uniqueKeyColumns *ColumnList, rangeStartArgs, rangeEndArgs []interface{}, chunkSize int64, includeRangeStartValues bool, hint string) (result string, explodedArgs []interface{}, err error) {
 	if uniqueKeyColumns.Len() == 0 {
 		return "", explodedArgs, fmt.Errorf("Got 0 columns in BuildUniqueKeyRangeEndPreparedQuery")
 	}
@@ -381,7 +354,7 @@ func BuildUniqueKeyRangeEndPreparedQueryViaTemptable(databaseName, tableName str
 	tableName = EscapeName(tableName)
 
 	// > vs. >=
-	var startRangeComparisonSign ValueComparisonSign = GreaterThanComparisonSign
+	var startRangeComparisonSign = GreaterThanComparisonSign
 	if includeRangeStartValues {
 		startRangeComparisonSign = GreaterThanOrEqualsComparisonSign
 	}
@@ -418,7 +391,7 @@ func BuildUniqueKeyRangeEndPreparedQueryViaTemptable(databaseName, tableName str
 	}
 	partitionInfo := ""
 	if partition != nil {
-		partitionInfo = fmt.Sprintf("partition(p%d)", partition.PartitionIndex)
+		partitionInfo = fmt.Sprintf("partition(%s)", partition.PartitionName)
 	}
 	// 如何获取某个区间的端点？
 	result = fmt.Sprintf(`
@@ -448,16 +421,16 @@ func BuildUniqueKeyRangeEndPreparedQueryViaTemptable(databaseName, tableName str
 }
 
 // Key Min
-func BuildUniqueKeyMinValuesPreparedQuery(databaseName, tableName string, partition *Partition, uniqueKeyColumns *ColumnList) (string, error) {
+func BuildUniqueKeyMinValuesPreparedQuery(databaseName, tableName string, partition *PartitionInfo, uniqueKeyColumns *ColumnList) (string, error) {
 	return buildUniqueKeyMinMaxValuesPreparedQuery(databaseName, tableName, partition, uniqueKeyColumns, "asc")
 }
 
 // Key Max
-func BuildUniqueKeyMaxValuesPreparedQuery(databaseName, tableName string, partition *Partition, uniqueKeyColumns *ColumnList) (string, error) {
+func BuildUniqueKeyMaxValuesPreparedQuery(databaseName, tableName string, partition *PartitionInfo, uniqueKeyColumns *ColumnList) (string, error) {
 	return buildUniqueKeyMinMaxValuesPreparedQuery(databaseName, tableName, partition, uniqueKeyColumns, "desc")
 }
 
-func buildUniqueKeyMinMaxValuesPreparedQuery(databaseName, tableName string, partition *Partition, uniqueKeyColumns *ColumnList, order string) (string, error) {
+func buildUniqueKeyMinMaxValuesPreparedQuery(databaseName, tableName string, partition *PartitionInfo, uniqueKeyColumns *ColumnList, order string) (string, error) {
 	if uniqueKeyColumns.Len() == 0 {
 		return "", fmt.Errorf("Got 0 columns in BuildUniqueKeyMinMaxValuesPreparedQuery")
 	}
@@ -480,7 +453,7 @@ func buildUniqueKeyMinMaxValuesPreparedQuery(databaseName, tableName string, par
 
 	partitionInfo := ""
 	if partition != nil {
-		partitionInfo = fmt.Sprintf("partition(p%d)", partition.PartitionIndex)
+		partitionInfo = fmt.Sprintf("partition(%s)", partition.PartitionName)
 	}
 
 	// 选择某个条件的1条记录
@@ -502,7 +475,6 @@ func buildUniqueKeyMinMaxValuesPreparedQuery(databaseName, tableName string, par
 // Original Table中删除数据，如何处理呢?
 //
 func BuildDMLDeleteQuery(databaseName, tableName string,
-	partition *Partition,
 	tableColumns, uniqueKeyColumns *ColumnList,
 	args []interface{}) (result string, uniqueKeyArgs []interface{}, err error) {
 
@@ -513,27 +485,13 @@ func BuildDMLDeleteQuery(databaseName, tableName string,
 		return result, uniqueKeyArgs, fmt.Errorf("No unique key columns found in BuildDMLDeleteQuery")
 	}
 
-	var partitionID int64 = -1
 	// uniqueKeyColumns 是前后都完全一致的列?
 	for _, column := range uniqueKeyColumns.Columns() {
 		tableOrdinal := tableColumns.Ordinals[column.Name] // uniqueKey的位置
 		arg := column.convertArg(args[tableOrdinal])       // args: full row image
 		uniqueKeyArgs = append(uniqueKeyArgs, arg)
-
-		if partition != nil && partitionID < 0 && partition.DBField == column.Name {
-			// 	确定partition
-			value, err := column.convertInt64Arg(args[tableOrdinal])
-			if err != nil {
-				panic(fmt.Sprintf("%s", err.Error()))
-			}
-			partitionID = value % partition.PartitionNum
-			if partitionID != partition.PartitionIndex {
-				// 不是关注的Partition，直接跳过
-				return "", nil, nil
-			}
-		}
-
 	}
+
 	databaseName = EscapeName(databaseName)
 	tableName = EscapeName(tableName)
 	equalsComparison, err := BuildEqualsPreparedComparison(uniqueKeyColumns.Names())
@@ -554,7 +512,7 @@ func BuildDMLDeleteQuery(databaseName, tableName string,
 	return result, uniqueKeyArgs, nil
 }
 
-func BuildDMLInsertQuery(databaseName, tableName string, partition *Partition,
+func BuildDMLInsertQuery(databaseName, tableName string,
 	tableColumns, sharedColumns, mappedSharedColumns *ColumnList, args []interface{}) (result string, sharedArgs []interface{}, err error) {
 
 	if len(args) != tableColumns.Len() {
@@ -569,25 +527,10 @@ func BuildDMLInsertQuery(databaseName, tableName string, partition *Partition,
 	databaseName = EscapeName(databaseName)
 	tableName = EscapeName(tableName)
 
-	var partitionID int64 = -1
 	for _, column := range sharedColumns.Columns() {
 		tableOrdinal := tableColumns.Ordinals[column.Name]
 		arg := column.convertArg(args[tableOrdinal])
 		sharedArgs = append(sharedArgs, arg)
-
-		// 如何需要支持partition，且没有选定 partitionID，则做字段名匹配
-		// 暂时只支持简单的Hash Partition
-		if partition != nil && partitionID < 0 && partition.DBField == column.Name {
-			value, err := column.convertInt64Arg(args[tableOrdinal])
-			if err != nil {
-				panic(fmt.Sprintf("%s", err.Error()))
-			}
-			partitionID = value % partition.PartitionNum // 简单的Hash Partition
-			if partitionID != partition.PartitionIndex {
-				// 不是关注的Partition，直接跳过
-				return "", nil, nil
-			}
-		}
 	}
 
 	mappedSharedColumnNames := duplicateNames(mappedSharedColumns.Names())
@@ -611,7 +554,7 @@ func BuildDMLInsertQuery(databaseName, tableName string, partition *Partition,
 	return result, sharedArgs, nil
 }
 
-func BuildDMLUpdateQuery(databaseName, tableName string, partition *Partition,
+func BuildDMLUpdateQuery(databaseName, tableName string,
 	tableColumns, sharedColumns, mappedSharedColumns, uniqueKeyColumns *ColumnList, valueArgs, whereArgs []interface{}) (result string, sharedArgs, uniqueKeyArgs []interface{}, err error) {
 	if len(valueArgs) != tableColumns.Len() {
 		return result, sharedArgs, uniqueKeyArgs, fmt.Errorf("value args count differs from table column count in BuildDMLUpdateQuery")
@@ -640,26 +583,11 @@ func BuildDMLUpdateQuery(databaseName, tableName string, partition *Partition,
 		sharedArgs = append(sharedArgs, arg)
 	}
 
-	// 如果是分区表，则uniqueKey一定包含分区字段
-	var partitionID int64 = -1
 	for _, column := range uniqueKeyColumns.Columns() {
 		tableOrdinal := tableColumns.Ordinals[column.Name]
 		arg := column.convertArg(whereArgs[tableOrdinal])
 		uniqueKeyArgs = append(uniqueKeyArgs, arg)
 
-		// 如何需要支持partition，且没有选定 partitionID，则做字段名匹配
-		// 暂时只支持简单的Hash Partition
-		if partition != nil && partitionID < 0 && partition.DBField == column.Name {
-			value, err := column.convertInt64Arg(whereArgs[tableOrdinal])
-			if err != nil {
-				panic(fmt.Sprintf("%s", err.Error()))
-			}
-			partitionID = value % partition.PartitionNum
-			if partitionID != partition.PartitionIndex {
-				// 不是关注的Partition，直接跳过
-				return "", nil, nil, nil
-			}
-		}
 	}
 
 	setClause, err := BuildSetPreparedClause(mappedSharedColumns)

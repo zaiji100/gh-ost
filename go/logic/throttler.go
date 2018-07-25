@@ -131,6 +131,7 @@ func (this *Throttler) parseChangelogHeartbeat(heartbeatValue string) (err error
 
 // collectReplicationLag reads the latest changelog heartbeat value
 func (this *Throttler) collectReplicationLag(firstThrottlingCollected chan<- bool) {
+
 	collectFunc := func() error {
 		if atomic.LoadInt64(&this.migrationContext.CleanupImminentFlag) > 0 {
 			return nil
@@ -153,6 +154,7 @@ func (this *Throttler) collectReplicationLag(firstThrottlingCollected chan<- boo
 				atomic.StoreInt64(&this.migrationContext.CurrentLag, int64(lag))
 			}
 		} else {
+			// 定时读取心跳
 			if heartbeatValue, err := this.inspector.readChangelogState("heartbeat"); err != nil {
 				return log.Errore(err)
 			} else {
